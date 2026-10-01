@@ -69,3 +69,8 @@ config.yaml.bak
 
 # Monocle agent-observability trace output (local file exporter)
 .monocle/
+
+# Local contributor scaffolding (not part of any PR)
+.uv-cache/
+.tools/
+docs/contributor/.scratch/
