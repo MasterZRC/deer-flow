@@ -133,6 +133,10 @@ def _stream_bridge_is_cross_process(config: AppConfig) -> bool:
     return bool((os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL") or "").strip())
 
 
+def _native_task_checkpoint_history_enabled(config: AppConfig) -> bool:
+    return getattr(getattr(config, "subagent_runtime", None), "checkpoint_history", False) is True
+
+
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-process configurations before persistence starts.
 
@@ -210,7 +214,7 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         return
     reason, rollback = signal
 
-    if getattr(getattr(config, "subagent_runtime", None), "checkpoint_history", False) is True:
+    if _native_task_checkpoint_history_enabled(config):
         raise SystemExit(f"{reason} cannot use subagent_runtime.checkpoint_history: SQLite child checkpoint writes are coordinated by one Gateway process. {rollback} or disable checkpoint_history.")
 
     if config.scheduler.enabled and not multi_instance_scheduler:
@@ -877,7 +881,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.subagent_checkpoint_history = None
-        if config.subagent_runtime.checkpoint_history is True:
+        if _native_task_checkpoint_history_enabled(config):
             from deerflow.subagents.checkpoint_history import SubagentCheckpointHistory
 
             history = SubagentCheckpointHistory(config)

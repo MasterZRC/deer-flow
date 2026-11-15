@@ -1,6 +1,6 @@
 import asyncio
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from uuid import uuid4
 
 import pytest
@@ -10,8 +10,9 @@ import pytest
 async def test_history_shutdown_drains_owner_loop_close_and_fences_new_children(monkeypatch):
     from deerflow.subagents import checkpoint_history
 
-    opened = threading.Event()
-    closing = threading.Event()
+    gateway_loop = asyncio.get_running_loop()
+    opened = asyncio.Event()
+    closing = asyncio.Event()
     allow_close = threading.Event()
     closed = threading.Event()
     loops = []
@@ -19,11 +20,11 @@ async def test_history_shutdown_drains_owner_loop_close_and_fences_new_children(
     @asynccontextmanager
     async def saver(_config):
         loops.append(asyncio.get_running_loop())
-        opened.set()
+        gateway_loop.call_soon_threadsafe(opened.set)
         try:
             yield object()
         finally:
-            closing.set()
+            gateway_loop.call_soon_threadsafe(closing.set)
             assert await asyncio.to_thread(allow_close.wait, 5)
             loops.append(asyncio.get_running_loop())
             closed.set()
@@ -37,11 +38,11 @@ async def test_history_shutdown_drains_owner_loop_close_and_fences_new_children(
 
     worker = asyncio.create_task(asyncio.to_thread(asyncio.run, child()))
     try:
-        assert await asyncio.to_thread(opened.wait, 5)
+        await asyncio.wait_for(opened.wait(), 5)
         assert history.has_writer_for_thread("thread")
         assert not history.has_writer_for_thread("other-thread")
         shutdown = asyncio.create_task(history.aclose())
-        assert await asyncio.to_thread(closing.wait, 5)
+        await asyncio.wait_for(closing.wait(), 5)
         with pytest.raises(RuntimeError, match="shutting down"):
             async with history.open("thread", threading.Event()):
                 pytest.fail("shutdown must fence new history writers")
@@ -56,7 +57,8 @@ async def test_history_shutdown_drains_owner_loop_close_and_fences_new_children(
     finally:
         allow_close.set()
         await history.aclose()
-        await asyncio.gather(worker, return_exceptions=True)
+        with suppress(asyncio.CancelledError):
+            await worker
 
 
 @pytest.mark.asyncio
