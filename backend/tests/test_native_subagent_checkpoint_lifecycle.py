@@ -87,11 +87,12 @@ def test_gateway_close_during_loop_drain_only_cancels_writer_once(tmp_path):
     history = SubagentCheckpointHistory(config)
     closing, release, cleanup_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
     loop = asyncio.new_event_loop()
+    started = loop.create_future()
 
     async def writer():
         async with history.open("thread", threading.Event()):
             try:
-                loop.stop()
+                started.set_result(None)
                 await asyncio.Event().wait()
             finally:
                 closing.set()
@@ -106,7 +107,8 @@ def test_gateway_close_during_loop_drain_only_cancels_writer_once(tmp_path):
     child = loop.create_task(writer())
     gateway = loop.create_task(close_gateway())
     try:
-        loop.run_forever()
+        loop.run_until_complete(asyncio.wait({started, child}, return_when=asyncio.FIRST_COMPLETED))
+        assert started.done()
         drain_checkpoint_writers_before_loop_exit(loop)
         loop.run_until_complete(gateway)
         assert child.cancelled()
