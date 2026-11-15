@@ -64,6 +64,7 @@ from deerflow.runtime.checkpoint_state import (
 from deerflow.runtime.context_keys import (
     AGENT_AUTH_CONTEXT_KEY,
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
+    CHECKPOINT_HISTORY_CONTEXT_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
     PROJECT_CONTEXT_KEY,
@@ -246,6 +247,7 @@ def _release_run_scoped_references(
         "__tool_approval_runtime",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
+        CHECKPOINT_HISTORY_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
         AGENT_RUNS_CONTEXT_KEY,
     }
@@ -272,6 +274,7 @@ def _release_run_scoped_references(
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+            configurable.pop(CHECKPOINT_HISTORY_CONTEXT_KEY, None)
             configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
             configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
         context = runnable_config.get("context")
@@ -623,6 +626,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
+            CHECKPOINT_HISTORY_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
@@ -660,6 +664,7 @@ def _build_runtime_context(
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
     agent_mcp_authority: Any | None = None,
+    subagent_checkpoint_history: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -687,6 +692,8 @@ def _build_runtime_context(
         runtime_ctx[AGENT_RUNS_CONTEXT_KEY] = agent_runs
     if conversation_reader is not None:
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
+    if subagent_checkpoint_history is not None:
+        runtime_ctx[CHECKPOINT_HISTORY_CONTEXT_KEY] = subagent_checkpoint_history
     if scheduler_capability is not None:
         runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
     if agent_mcp_authority is not None:
@@ -761,6 +768,7 @@ class RunContext:
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
     verify_artifacts: Any | None = field(default=None)
+    subagent_checkpoint_history: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -769,6 +777,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+        configurable.pop(CHECKPOINT_HISTORY_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
         configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
@@ -1168,6 +1177,7 @@ async def run_agent(
                     run_id=run_id,
                     rollback_point=rollback_point,
                     snapshot_capture_failed=snapshot_capture_failed,
+                    subagent_checkpoint_history=ctx.subagent_checkpoint_history,
                 )
                 logger.info(
                     "Run %s rolled back to pre-run checkpoint %s",
@@ -1384,6 +1394,7 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
             agent_mcp_authority=ctx.agent_mcp_authority,
+            subagent_checkpoint_history=ctx.subagent_checkpoint_history,
         )
         # A disabled all-reject escape still needs the HITL hook to consume the
         # pending interrupt. The assembly marker makes that hook deny rather
@@ -2064,6 +2075,7 @@ async def run_agent(
                                 run_id=run_id,
                                 rollback_point=rollback_point,
                                 snapshot_capture_failed=snapshot_capture_failed,
+                                subagent_checkpoint_history=ctx.subagent_checkpoint_history,
                             )
                         if checkpoint_rollback_completed:
                             await _publish_restored_checkpoint_values(
@@ -3417,6 +3429,7 @@ async def _rollback_to_pre_run_checkpoint(
     run_id: str,
     rollback_point: RollbackPoint | None,
     snapshot_capture_failed: bool,
+    subagent_checkpoint_history: Any | None = None,
 ) -> bool:
     """Restore the complete pre-run state and report whether it completed.
 
@@ -3436,6 +3449,10 @@ async def _rollback_to_pre_run_checkpoint(
         return False
 
     if rollback_point is None:
+        if subagent_checkpoint_history is not None:
+            # The run holds the thread reservation; cancelled children may still
+            # be flushing their last checkpoints on the isolated event loop.
+            await subagent_checkpoint_history.wait_for_thread(thread_id)
         await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
         logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
         return True

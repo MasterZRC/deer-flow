@@ -210,6 +210,9 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         return
     reason, rollback = signal
 
+    if getattr(getattr(config, "subagent_runtime", None), "checkpoint_history", False) is True:
+        raise SystemExit(f"{reason} cannot use subagent_runtime.checkpoint_history: SQLite child checkpoint writes are coordinated by one Gateway process. {rollback} or disable checkpoint_history.")
+
     if config.scheduler.enabled and not multi_instance_scheduler:
         raise SystemExit(f"{reason} cannot run with scheduler.enabled=true because each worker starts its own scheduler. {rollback}, scheduler.multi_instance=true, or scheduler.enabled=false.")
 
@@ -873,6 +876,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         await init_engine_from_config(config.database)
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
+        app.state.subagent_checkpoint_history = None
+        if config.subagent_runtime.checkpoint_history is True:
+            from deerflow.subagents.checkpoint_history import SubagentCheckpointHistory
+
+            history = SubagentCheckpointHistory(config)
+            stack.push_async_callback(history.aclose)
+            app.state.subagent_checkpoint_history = history
         app.state.store = await stack.enter_async_context(make_store(config))
 
         # Record the checkpointer/Store backend and the provisioner endpoint
@@ -1318,6 +1328,7 @@ def get_run_context(request: Request) -> RunContext:
         agent_runs=agent_runs,
         checkpointer=checkpointer,
         store=get_store(request),
+        subagent_checkpoint_history=getattr(request.app.state, "subagent_checkpoint_history", None),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),

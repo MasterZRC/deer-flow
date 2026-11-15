@@ -2438,6 +2438,7 @@ class TestThreadQueries:
         ):
             result = client.get_thread("t1")
 
+        assert mock_checkpointer.list.call_args.args[0]["configurable"]["checkpoint_ns"] == ""
         assert result["thread_id"] == "t1"
         checkpoints = result["checkpoints"]
         assert len(checkpoints) == 3

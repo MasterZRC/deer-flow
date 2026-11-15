@@ -18,6 +18,12 @@ DEFAULT_AGENT_NAME_METADATA_VALUE: Final[str] = "__default__"
 # Gateway admission and refused by the run worker's runtime-context merge.
 PROJECT_CONTEXT_KEY: Final[str] = "__deerflow_project_context"
 AGENT_AUTH_CONTEXT_KEY: Final[str] = "__deerflow_mcp_agent_authority"
+CHECKPOINT_HISTORY_CONTEXT_KEY: Final[str] = "__subagent_checkpoint_history"
+NATIVE_TASK_CHECKPOINT_NS_PREFIX: Final[str] = "deerflow_native_task:"
+
+
+def is_native_checkpoint_namespace(namespace: str) -> bool:
+    return any(part.startswith(NATIVE_TASK_CHECKPOINT_NS_PREFIX) for part in namespace.split("|"))
 
 
 def checkpoint_agent_binding_metadata(metadata: object) -> dict[str, str]:

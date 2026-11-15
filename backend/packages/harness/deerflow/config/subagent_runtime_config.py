@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field
 class SubagentRuntimeConfig(BaseModel):
     """Process-local admission and execution limits shared by all subagents."""
 
+    checkpoint_history: bool = Field(
+        default=False,
+        description="Persist ordinary Gateway task histories in the configured file-backed SQLite checkpointer for inspection after restart.",
+    )
+
     max_running: int = Field(
         default=3,
         ge=1,

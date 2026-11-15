@@ -1111,6 +1111,8 @@ async def task_tool(
 
     # Create executor
     from deerflow.mcp.agent_auth import runtime_agent_authority
+    from deerflow.runtime.context_keys import CHECKPOINT_HISTORY_CONTEXT_KEY
+    from deerflow.subagents.checkpoint_history import SubagentCheckpointHistory
 
     executor_kwargs = {
         "config": config,
@@ -1143,6 +1145,9 @@ async def task_tool(
     approval_runtime = parent_context.get("__tool_approval_runtime")
     if approval_runtime is not None:
         executor_kwargs["approval_runtime"] = approval_runtime.child()
+    history = parent_context.get(CHECKPOINT_HISTORY_CONTEXT_KEY)
+    if isinstance(history, SubagentCheckpointHistory):
+        executor_kwargs["checkpoint_history"] = history
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:

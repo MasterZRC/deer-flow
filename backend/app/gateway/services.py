@@ -92,7 +92,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, CHECKPOINT_HISTORY_CONTEXT_KEY, PROJECT_CONTEXT_KEY, is_native_checkpoint_namespace
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -1153,6 +1153,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
             AGENT_AUTH_CONTEXT_KEY,
+            CHECKPOINT_HISTORY_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -2060,6 +2061,16 @@ async def build_thread_checkpoint_state_mutation_accessor(
     return build_checkpoint_state_mutation_accessor(request, **mutation_kwargs)
 
 
+def validate_writable_checkpoint_selector(selector: Mapping[str, Any]) -> None:
+    """Native task checkpoints are an inspection record, not a runnable state."""
+    namespaces = [selector.get("checkpoint_ns")]
+    checkpoint_map = selector.get("checkpoint_map")
+    if isinstance(checkpoint_map, Mapping):
+        namespaces.extend(checkpoint_map)
+    if any(isinstance(namespace, str) and is_native_checkpoint_namespace(namespace) for namespace in namespaces):
+        raise HTTPException(status_code=400, detail="Native subagent checkpoint history is read-only")
+
+
 async def apply_checkpoint_to_run_config(
     config: dict[str, Any],
     *,
@@ -2068,6 +2079,10 @@ async def apply_checkpoint_to_run_config(
     request: Request,
 ) -> None:
     """Validate an optional run checkpoint and attach it to RunnableConfig."""
+    # LangGraph also accepts configurable fields at the top level of RunnableConfig.
+    validate_writable_checkpoint_selector(config)
+    if isinstance(config.get("configurable"), Mapping):
+        validate_writable_checkpoint_selector(config["configurable"])
     checkpoint = getattr(body, "checkpoint", None)
     checkpoint_id = getattr(body, "checkpoint_id", None)
     checkpoint_ns = ""
@@ -2076,6 +2091,7 @@ async def apply_checkpoint_to_run_config(
     if checkpoint:
         if not isinstance(checkpoint, Mapping):
             raise HTTPException(status_code=400, detail="checkpoint must be an object")
+        validate_writable_checkpoint_selector(checkpoint)
         checkpoint_thread_id = checkpoint.get("thread_id")
         if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
             raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")

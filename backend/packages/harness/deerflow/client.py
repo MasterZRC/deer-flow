@@ -809,6 +809,7 @@ class DeerFlowClient:
         """Get the complete materialized checkpoint history for a thread."""
         checkpointer = self._get_thread_checkpointer()
         config = self._get_runnable_config(thread_id)
+        config["configurable"].setdefault("checkpoint_ns", "")  # An omitted namespace makes the raw saver scan every child history.
         self._ensure_agent(config)
         if self._agent is None:
             raise RuntimeError("Agent was not initialized")

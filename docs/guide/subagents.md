@@ -267,6 +267,32 @@ Native workers support per-subagent `thinking_enabled` and `reasoning_effort` th
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
+## Native task checkpoint history
+
+To inspect ordinary Gateway `task` executions after a restart, enable
+`subagent_runtime.checkpoint_history: true` and restart the Gateway. This
+requires a single Gateway process and a file-backed SQLite checkpointer. Either set `database.backend: sqlite`
+or use the existing standalone SQLite `checkpointer` configuration. Run events
+can stay in memory. Enabling this option retains intermediate child messages and
+tool results in the checkpoint database, so allow for additional storage and
+apply the parent thread's access and retention rules.
+
+For a trusted reader with access to the parent thread, call `list` or `alist`
+with `{"configurable": {"thread_id": thread_id}}` and
+`filter={"subagent_parent_run_id": run_id}`. Omit `checkpoint_ns` to search
+all namespaces in that thread. Each native execution
+has a namespace segment `deerflow_native_task:<subagent_execution_id>` and a
+`subagent_tool_call_id` that correlates it with the parent's tool call. Match
+the namespace to the execution ID when selecting rows. Provider tool-call IDs can
+repeat across runs. In delta mode, bind a `CheckpointStateAccessor` to the
+child graph and saver with `mode="delta", direct_namespace=True`, then call
+`await reader.aget(row.config)` to materialize the selected snapshot.
+The parent conversation continues to use the root namespace.
+
+This option supports read-only inspection. An interrupted child still follows
+the existing execution policy. Durable `batch_task` items use their own
+[recovery protocol](../../backend/docs/BATCH_CONTINUATION.md).
+
 ## Tool restrictions
 
 Subagent `tools` allowlists and `disallowed_tools` denylists apply to middleware-declared tools as well as inherited tools, even when global authorization is disabled. Denylists take precedence; an empty allowlist excludes all middleware declarations.

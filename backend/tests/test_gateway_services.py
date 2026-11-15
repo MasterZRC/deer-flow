@@ -2124,6 +2124,35 @@ def test_apply_checkpoint_to_run_config_writes_checkpoint_fields():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("location", ["checkpoint", "configurable", "config", "checkpoint_map"])
+async def test_run_cannot_select_native_task_history(location):
+    from fastapi import HTTPException
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.gateway.services import apply_checkpoint_to_run_config
+
+    saver = InMemorySaver()
+    namespace = "tools:parent|deerflow_native_task:child"
+    selected = await saver.aput({"configurable": {"thread_id": "t", "checkpoint_ns": namespace}}, empty_checkpoint(), {}, {})
+    fields = selected["configurable"]
+    body = SimpleNamespace(checkpoint=None, checkpoint_id=None)
+    config = {"configurable": {"thread_id": "t"}}
+    if location == "checkpoint":
+        body.checkpoint = fields
+    elif location == "checkpoint_map":
+        config["configurable"]["checkpoint_map"] = {namespace: fields["checkpoint_id"]}
+    else:
+        target = config["configurable"] if location == "configurable" else config
+        target.update(fields)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(checkpointer=saver)))
+
+    with pytest.raises(HTTPException) as exc:
+        await apply_checkpoint_to_run_config(config, body=body, thread_id="t", request=request)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.anyio
 async def test_seeded_checkpoint_messages_precede_the_first_new_run_messages():
     from unittest.mock import AsyncMock, MagicMock, patch
 

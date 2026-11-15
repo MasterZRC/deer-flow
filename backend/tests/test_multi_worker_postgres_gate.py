@@ -657,6 +657,15 @@ def test_worker_count_rollback_also_withdraws_the_declaration(monkeypatch, decla
     assert expected_rollback in str(exc_info.value)
 
 
+def test_multiple_workers_reject_sqlite_child_history_even_with_postgres_app_data(monkeypatch):
+    config = _cluster_ready()
+    config.subagent_runtime = SimpleNamespace(checkpoint_history=True)
+    config.checkpointer = SimpleNamespace(type="sqlite", connection_string="checkpoint.db")
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    with pytest.raises(SystemExit, match="subagent_runtime.checkpoint_history"):
+        _enforce_postgres_for_multi_worker(config)
+
+
 def test_offered_env_rollback_clears_the_gate(monkeypatch):
     """The remediation a refusal offers must make the next start succeed."""
     monkeypatch.setenv("GATEWAY_WORKERS", "2")

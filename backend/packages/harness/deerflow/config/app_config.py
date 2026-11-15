@@ -687,6 +687,16 @@ class AppConfig(BaseModel):
         return config
 
     @model_validator(mode="after")
+    def _validate_subagent_checkpoint_history(self) -> "AppConfig":
+        if self.subagent_runtime.checkpoint_history:
+            # A standalone checkpointer takes precedence over the unified database.
+            legacy = self.checkpointer
+            backend = legacy.type if legacy is not None else self.database.backend
+            if backend != "sqlite" or (legacy is not None and legacy.connection_string == ":memory:"):
+                raise ValueError("subagent_runtime.checkpoint_history requires a file-backed SQLite checkpointer")
+        return self
+
+    @model_validator(mode="after")
     def _build_name_indexes(self) -> "AppConfig":
         """Build name -> config lookup tables for O(1) ``get_*_config``.
 

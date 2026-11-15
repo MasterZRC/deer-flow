@@ -3361,6 +3361,36 @@ class TestThreadSafety:
         # it returns only once the coroutine ran and the future resolved.
         assert handles[0].result(timeout=10) is None
 
+    def test_shutdown_drains_native_checkpoint_writer_before_stopping_isolated_loop(self, executor_module, tmp_path):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.subagents.checkpoint_history import SubagentCheckpointHistory
+
+        app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path)}})
+        history = SubagentCheckpointHistory(app_config)
+        opened = threading.Event()
+        finished = threading.Event()
+
+        async def child():
+            try:
+                async with history.open("thread", threading.Event()):
+                    opened.set()
+                    await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                finished.set()
+
+        worker = executor_module.run_on_isolated_subagent_loop(child())
+        try:
+            assert opened.wait(timeout=5)
+            executor_module._shutdown_isolated_subagent_loop()
+            assert finished.is_set()
+            assert worker.cancelled()
+            assert executor_module._isolated_subagent_loop is None
+        finally:
+            worker.cancel()
+            asyncio.run(history.aclose())
+            executor_module._shutdown_isolated_subagent_loop()
+
     def test_shutdown_retains_isolated_loop_ownership_until_worker_exits(self, executor_module):
         """A bounded join must not detach a still-live persistent loop."""
 
@@ -3415,6 +3445,11 @@ class TestThreadSafety:
         assert executor_module._isolated_subagent_loop_shutdown_pending is True
         assert loop.closed is False
         assert thread.join_calls == 1
+
+        # The worker may have re-entered its loop to drain SQLite writes.
+        # Another stop callback here would interrupt run_until_complete.
+        executor_module._shutdown_isolated_subagent_loop()
+        assert loop.stop_calls == 1
 
         with patch.object(executor_module.asyncio, "new_event_loop") as new_event_loop:
             with pytest.raises(RuntimeError, match="shutdown is still pending"):

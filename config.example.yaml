@@ -2034,6 +2034,7 @@ subagent_runtime:
   max_queued: 64
   admission_policy: queue       # queue or reject when all slots are occupied
   queue_timeout_seconds: 300
+  checkpoint_history: false     # retain ordinary Gateway task histories in file-backed SQLite
 
 # subagents:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).

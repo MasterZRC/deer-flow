@@ -46,6 +46,7 @@ from deerflow.subagents.capacity import (
     SubagentExecutionCapacity,
     get_subagent_execution_capacity,
 )
+from deerflow.subagents.checkpoint_history import drain_checkpoint_writers_before_loop_exit
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.context_snapshot import SNAPSHOT_SYSTEM_NOTE, ParentContextSnapshot
 from deerflow.subagents.report_contract import (
@@ -68,6 +69,7 @@ from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
     from deerflow.models.reasoning import ResolvedReasoning
+    from deerflow.subagents.checkpoint_history import SubagentCheckpointHistory
 
     # Imported lazily at runtime inside _build_initial_state: importing
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
@@ -676,7 +678,10 @@ def _run_isolated_subagent_loop(
     try:
         loop.run_forever()
     finally:
-        started_event.clear()
+        try:
+            drain_checkpoint_writers_before_loop_exit(loop)
+        finally:
+            started_event.clear()
 
 
 def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
@@ -694,6 +699,7 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
             if loop is None:
                 _isolated_subagent_loop_shutdown_pending = False
                 return
+            first_stop = not _isolated_subagent_loop_shutdown_pending
             _isolated_subagent_loop_shutdown_pending = True
 
             # A previous bounded shutdown/startup attempt already requested
@@ -703,7 +709,7 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
             if only_if_pending and thread is not None and thread.is_alive():
                 return
 
-        if loop.is_running():
+        if first_stop and loop.is_running():
             loop.call_soon_threadsafe(loop.stop)
 
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
@@ -960,6 +966,7 @@ class SubagentExecutor:
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
         agent_mcp_authority: Any | None = None,
+        checkpoint_history: "SubagentCheckpointHistory | None" = None,
     ):
         """Initialize the executor.
 
@@ -1040,6 +1047,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.input_gate = input_gate
+        self.checkpoint_history = checkpoint_history
         self.agent_mcp_authority = agent_mcp_authority
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
@@ -1281,6 +1289,13 @@ class SubagentExecutor:
 
         policy_names = ToolPolicyNameResolver()
         middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
+        state_schema = ThreadState
+        if self.checkpoint_history is not None:
+            from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+
+            mode = self.checkpoint_history.channel_mode
+            state_schema = get_thread_state_schema(mode)
+            middlewares = normalize_middleware_state_schemas(middlewares, mode)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1306,8 +1321,10 @@ class SubagentExecutor:
             tools=bound_tools,
             middleware=middlewares,
             system_prompt=None,
-            state_schema=ThreadState,
-            checkpointer=False,
+            state_schema=state_schema,
+            # An opted-in task supplies its own saver in the child runnable
+            # config. Other executions must never inherit the parent's saver.
+            checkpointer=None if self.checkpoint_history is not None else False,
         )
         # Use the compiled registry: it includes middleware tools, normalized
         # callables, and LangChain's last-definition-wins name precedence.
@@ -1878,11 +1895,9 @@ class SubagentExecutor:
             collector_caller = f"subagent:{self.config.name}"
             collector = SubagentTokenCollector(caller=collector_caller)
 
-            # Do not put checkpoint coordinates (thread_id/checkpoint_ns/etc.)
-            # in the child config. LangGraph inherits those coordinates from
-            # the ambient parent run so this execution keeps its subgraph
-            # namespace. Business consumers receive thread_id via ``context``
-            # below instead.
+            # Leave checkpoint coordinates implicit for the default stream.
+            # The history writer installs its own namespace and saver only
+            # after admission; tools receive thread_id through context below.
             run_config: RunnableConfig = {
                 # Super-steps, not turns: ``_create_agent`` (just above) scaled
                 # ``max_turns`` by the compiled chain's per-turn node count.
@@ -1990,7 +2005,10 @@ class SubagentExecutor:
                 return result
 
             cancelled_during_stream = False
-            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            if self.checkpoint_history is not None:
+                stream = self.checkpoint_history.stream(agent, state, run_config, context, execution_id=result.task_id, tool_call_id=result.external_task_id, cancel_event=result.cancel_event)
+            else:
+                stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
             try:
                 async for chunk in stream:
                     # A yielded values chunk is already executed state.  Retain it

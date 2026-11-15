@@ -1,10 +1,10 @@
 # Subagents (`deerflow/subagents/`)
 
-Runs delegated work for the lead agent. `task` starts one in-memory subagent and
-waits for it. `batch_task` writes durable rows that a lease-based batch service
-executes, in the Gateway or in a separate worker. This directory also owns the
-subagent registry, capacity limits, the report contract and the acceptance checks
-that verify a subagent's claims. Batch behaviour and ownership:
+The lead agent waits for each `task`. With SQLite history enabled, the child
+opens and closes its saver on its own loop, in a namespace under the parent
+thread. A Gateway or standalone worker leases durable `batch_task` rows. This
+directory owns the registry, capacity limits, reports and acceptance checks.
+Batch behaviour and ownership:
 [BATCH_CONTINUATION.md](../../../../docs/BATCH_CONTINUATION.md).
 
 ## Verify

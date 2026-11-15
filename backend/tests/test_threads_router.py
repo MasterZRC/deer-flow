@@ -909,6 +909,33 @@ def test_delete_thread_route_rejects_active_thread_operation_without_deleting_me
     assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
 
 
+@pytest.mark.anyio
+async def test_delete_thread_keeps_data_until_native_checkpoint_writer_closes(tmp_path, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+    from deerflow.subagents.checkpoint_history import SubagentCheckpointHistory
+
+    app, store, _ = _build_thread_app()
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path)}})
+    history = app.state.subagent_checkpoint_history = SubagentCheckpointHistory(config)
+    monkeypatch.setattr(threads, "get_paths", lambda: Paths(tmp_path))
+    thread_id = "thread-with-child-writer"
+    child_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "deerflow_native_task:child"}}
+    async with make_checkpointer(config) as parent_saver, AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        app.state.checkpointer = parent_saver
+        assert (await client.post("/api/threads", json={"thread_id": thread_id})).status_code == 200
+        async with history.open(thread_id, threading.Event()) as child_saver:
+            await child_saver.aput(child_config, empty_checkpoint(), {}, {})
+            assert (await client.delete(f"/api/threads/{thread_id}")).status_code == 409
+            assert await store.aget(THREADS_NS, thread_id) is not None
+            assert await parent_saver.aget_tuple(child_config) is not None
+        assert (await client.delete(f"/api/threads/{thread_id}")).status_code == 200
+        assert await store.aget(THREADS_NS, thread_id) is None
+        assert [row async for row in parent_saver.alist({"configurable": {"thread_id": thread_id}})] == []
+
+
 def test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes(tmp_path):
     """A cancelled delete must not release its reservation mid-rmtree.
 
@@ -5008,6 +5035,29 @@ def test_update_thread_state_rejects_nonexistent_namespace_without_checkpoint_id
     root_after = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
     assert root_after.config == root_before.config
     assert root_after.checkpoint == root_before.checkpoint
+
+
+def test_native_task_history_is_excluded_from_thread_history_and_read_only(monkeypatch) -> None:
+    app, _store, saver = _build_thread_app()
+    thread_id = "native-history"
+    namespace = "tools:parent|deerflow_native_task:child"
+    source = {"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}}
+
+    async def mutation_boundary(request, **kwargs):
+        return gateway_services.build_checkpoint_state_mutation_accessor(request, **kwargs)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": thread_id}).status_code == 200
+        child = asyncio.run(saver.aput(source, empty_checkpoint(), {}, {}))
+        history = client.post(f"/api/threads/{thread_id}/history", json={})
+        assert history.status_code == 200
+        assert history.json()
+        assert child["configurable"]["checkpoint_id"] not in {entry["checkpoint_id"] for entry in history.json()}
+        response = client.post(f"/api/threads/{thread_id}/state", json={"checkpoint": source["configurable"], "values": {"title": "edited"}})
+
+    assert response.status_code == 400, response.text
+    assert asyncio.run(saver.aget_tuple(source)).config == child
 
 
 def test_update_thread_state_rejects_checkpoint_object_for_another_thread() -> None:

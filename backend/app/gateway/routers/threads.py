@@ -50,6 +50,7 @@ from app.gateway.services import (
     custom_agent_name,
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
+    validate_writable_checkpoint_selector,
 )
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
@@ -830,6 +831,11 @@ def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str,
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
+
+    # A timed-out child can still be flushing SQLite after its parent run ends.
+    history = getattr(request.app.state, "subagent_checkpoint_history", None)
+    if history is not None and history.has_writer_for_thread(thread_id):
+        raise ConflictError("Native subagent checkpoint writes are still in flight")
 
     # One owner identity for every cleanup step below: the filesystem bucket, the
     # persisted runs/events/feedback and the thread_meta row all belong to the
@@ -1905,6 +1911,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     checkpoint_id = body.checkpoint_id
     checkpoint_ns = ""
     if body.checkpoint is not None:
+        validate_writable_checkpoint_selector(body.checkpoint)
         checkpoint_thread_id = body.checkpoint.get("thread_id")
         if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
             raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")

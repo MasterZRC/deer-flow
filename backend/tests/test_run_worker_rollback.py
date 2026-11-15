@@ -2460,6 +2460,12 @@ async def test_rollback_restored_checkpoint_becomes_latest_with_real_checkpointe
 async def test_rollback_deletes_thread_when_no_snapshot_exists():
     checkpointer = FakeCheckpointer()
 
+    async def wait_for_thread(thread_id):
+        assert thread_id == "thread-1"
+        checkpointer.adelete_thread.assert_not_awaited()
+
+    history = SimpleNamespace(wait_for_thread=AsyncMock(side_effect=wait_for_thread))
+
     await _rollback_to_pre_run_checkpoint(
         accessor=_rollback_accessor(checkpointer),
         checkpointer=checkpointer,
@@ -2467,8 +2473,10 @@ async def test_rollback_deletes_thread_when_no_snapshot_exists():
         run_id="run-1",
         rollback_point=None,
         snapshot_capture_failed=False,
+        subagent_checkpoint_history=history,
     )
 
+    history.wait_for_thread.assert_awaited_once_with("thread-1")
     checkpointer.adelete_thread.assert_awaited_once_with("thread-1")
     checkpointer.aput_writes.assert_not_awaited()
 
@@ -2872,8 +2880,8 @@ def test_build_runtime_context_defaults_to_thread_and_run_id():
 
 @pytest.mark.parametrize("forged_reader", [lambda: None, {"allowed_ids": ["other-thread"]}])
 @pytest.mark.parametrize("carrier", ["context", "configurable"])
-def test_embedded_caller_cannot_supply_conversation_reader(forged_reader, carrier):
-    key = "__conversation_reader"
+@pytest.mark.parametrize("key", ["__conversation_reader", "__subagent_checkpoint_history"])
+def test_embedded_caller_cannot_supply_history_capabilities(forged_reader, carrier, key):
     config = {carrier: {key: forged_reader}}
 
     runtime_context = _build_runtime_context("thread-1", "run-1", config.get("context"))

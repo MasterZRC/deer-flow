@@ -16,6 +16,7 @@ def test_subagent_runtime_defaults_are_safe_and_bounded() -> None:
     assert config.max_queued == 64
     assert config.admission_policy == "queue"
     assert config.queue_timeout_seconds == 300
+    assert config.checkpoint_history is False
 
     with pytest.raises(ValidationError):
         SubagentRuntimeConfig(max_running=0)
@@ -23,6 +24,26 @@ def test_subagent_runtime_defaults_are_safe_and_bounded() -> None:
         SubagentRuntimeConfig(max_running=65)
     with pytest.raises(ValidationError):
         SubagentRuntimeConfig(max_queued=10_001)
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [
+        {},
+        {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/test"}},
+        {"database": {"backend": "sqlite"}, "checkpointer": {"type": "memory"}},
+        {"checkpointer": {"type": "sqlite", "connection_string": ":memory:"}},
+    ],
+)
+def test_native_checkpoint_history_requires_persistent_sqlite(storage) -> None:
+    with pytest.raises(ValidationError, match="checkpoint_history requires a file-backed SQLite checkpointer"):
+        AppConfig.model_validate({"sandbox": {"use": "tests:Sandbox"}, **storage, "subagent_runtime": {"checkpoint_history": True}})
+
+
+@pytest.mark.parametrize("storage", [{"database": {"backend": "sqlite"}}, {"checkpointer": {"type": "sqlite"}}])
+def test_native_checkpoint_history_accepts_both_sqlite_configurations(storage) -> None:
+    config = AppConfig.model_validate({"sandbox": {"use": "tests:Sandbox"}, **storage, "subagent_runtime": {"checkpoint_history": True}})
+    assert config.subagent_runtime.checkpoint_history
 
 
 def test_subagent_batch_defaults_separate_total_live_and_running() -> None:
